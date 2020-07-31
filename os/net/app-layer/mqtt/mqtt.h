@@ -433,8 +433,8 @@ struct mqtt_in_packet {
   uint16_t remaining_length;
   uint16_t mid;
 
-  /* Helper variables needed to decode the remaining_length */
-  uint8_t has_remaining_length;
+  uint8_t has_remaining_length; /* the remaining_length has been decoded */
+  uint8_t remaining_length_enc_len;  /* number of bytes used to encode remaining_length */
 
   /* Not the same as payload in the MQTT sense, it also contains the variable
    * header.

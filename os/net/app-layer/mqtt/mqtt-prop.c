@@ -36,6 +36,7 @@
 #include "mqtt-prop.h"
 
 #include <stdlib.h>
+#include <inttypes.h>
 /*---------------------------------------------------------------------------*/
 #if MQTT_PROP_USE_MEMB
 MEMB(prop_lists_mem, struct mqtt_prop_list, MQTT_PROP_MAX_OUT_PROP_LISTS);
@@ -242,7 +243,7 @@ mqtt_prop_encode(struct mqtt_prop_out_property **prop_out, mqtt_vhdr_prop_t prop
     return 0;
   }
 
-  DBG("MQTT - Property encoded length %i\n", (*prop_out)->property_len);
+  DBG("MQTT - Property encoded length %"PRIu32"\n", (*prop_out)->property_len);
 
   return (*prop_out)->property_len;
 }
@@ -285,9 +286,16 @@ mqtt_prop_decode_input_props(struct mqtt_connection *conn)
   conn->in_packet.payload_start += prop_len_bytes;
   conn->in_packet.curr_props_pos = conn->in_packet.props_start;
 
-  DBG("MQTT - First byte of first prop %i\n", *conn->in_packet.curr_props_pos);
+  if(conn->in_packet.properties_len > 0) {
+    DBG("MQTT - First byte of first prop %i\n", *conn->in_packet.curr_props_pos);
+  }
 
   conn->in_packet.has_props = 1;
+  conn->in_packet.byte_counter += conn->in_packet.properties_len +
+    conn->in_packet.properties_enc_len;
+  conn->in_publish_msg.payload_length -= conn->in_packet.properties_len +
+    conn->in_packet.properties_enc_len;
+  conn->in_publish_msg.payload_left = conn->in_publish_msg.payload_length;
 }
 #endif
 /*---------------------------------------------------------------------------*/
@@ -300,7 +308,7 @@ decode_prop_utf8(struct mqtt_connection *conn,
 
   len = (buf_in[0] << 8) + buf_in[1];
 
-  DBG("MQTT - Decoding %d-char UTF8 string property\n", len);
+  DBG("MQTT - Decoding %lu-char UTF8 string property\n", len);
 
   /* Include NULL terminator in destination */
   if((len + MQTT_STRING_LEN_SIZE + 1) > MQTT_PROP_MAX_PROP_LENGTH) {
@@ -413,7 +421,7 @@ decode_prop_utf8_pair(struct mqtt_connection *conn,
   len2 = (buf_in[len1 + MQTT_STRING_LEN_SIZE] << 8) + buf_in[len1 + MQTT_STRING_LEN_SIZE + 1];
   total_len = len1 + len2;
 
-  DBG("MQTT - Decoding %d-char UTF8 string pair property (%i + %i)\n", total_len, len1, len2);
+  DBG("MQTT - Decoding %"PRIu32"-char UTF8 string pair property (%"PRIu32" + %"PRIu32")\n", total_len, len1, len2);
 
   if((total_len + 2 * MQTT_STRING_LEN_SIZE) > MQTT_PROP_MAX_PROP_LENGTH) {
     DBG("MQTT - Error, property too long (max %i bytes)", MQTT_PROP_MAX_PROP_LENGTH);
@@ -511,7 +519,7 @@ mqtt_get_next_in_prop(struct mqtt_connection *conn,
 
   prop_len = parse_prop(conn, *prop_id, conn->in_packet.curr_props_pos + 1, data);
 
-  DBG("MQTT - Decoded property len %i bytes\n", prop_len);
+  DBG("MQTT - Decoded property len %"PRIu32" bytes\n", prop_len);
 
   conn->in_packet.curr_props_pos += prop_id_len_bytes + prop_len;
 
@@ -616,7 +624,7 @@ mqtt_prop_print_input_props(struct mqtt_connection *conn)
 
   prop_len = mqtt_get_next_in_prop(conn, &prop_id, data);
   while(prop_len) {
-    DBG("MQTT - Property ID %i, length %i\n", prop_id, prop_len);
+    DBG("MQTT - Property ID %i, length %"PRIu32"\n", prop_id, prop_len);
 
     switch(prop_id) {
     case MQTT_VHDR_PROP_PAYLOAD_FMT_IND:
@@ -629,7 +637,7 @@ mqtt_prop_print_input_props(struct mqtt_connection *conn)
     case MQTT_VHDR_PROP_RECEIVE_MAX:
     case MQTT_VHDR_PROP_TOPIC_ALIAS_MAX:
     case MQTT_VHDR_PROP_SUB_ID: {
-      DBG("MQTT - Decoded property value '%i'\n", (uint32_t)*data);
+      DBG("MQTT - Decoded property value '%"PRIu32"'\n", (uint32_t)*data);
       break;
     }
     case MQTT_VHDR_PROP_CONTENT_TYPE:
@@ -658,8 +666,8 @@ mqtt_prop_print_input_props(struct mqtt_connection *conn)
       len2 = (data[len1 + MQTT_STRING_LEN_SIZE] << 8) + data[len1 + MQTT_STRING_LEN_SIZE + 1];
 #endif
       DBG("MQTT - Decoded property value [(%i %i) %.*s, (%i %i) %.*s]",
-          data[0], data[1], len1, data + MQTT_STRING_LEN_SIZE,
-          data[len1 + MQTT_STRING_LEN_SIZE], data[len1 + MQTT_STRING_LEN_SIZE + 1], len2, data + len1 + 2 * MQTT_STRING_LEN_SIZE);
+          data[0], data[1], (int) len1, data + MQTT_STRING_LEN_SIZE,
+          data[len1 + MQTT_STRING_LEN_SIZE], data[len1 + MQTT_STRING_LEN_SIZE + 1], (int) len2, data + len1 + 2 * MQTT_STRING_LEN_SIZE);
       DBG("\n");
       break;
     }
@@ -717,7 +725,7 @@ mqtt_prop_print_list(struct mqtt_prop_list *prop_list, mqtt_vhdr_prop_t prop_id)
 
     do {
       if(prop != NULL && (prop->id == prop_id || prop_id == MQTT_VHDR_PROP_ANY)) {
-        DBG("Property %p ID %i len %i\n", prop, prop->id, prop->property_len);
+        DBG("Property %p ID %i len %"PRIu32"\n", prop, prop->id, prop->property_len);
       }
       prop = (struct mqtt_prop_out_property *)list_item_next(prop);
     } while(prop != NULL);
@@ -775,7 +783,7 @@ mqtt_prop_register(struct mqtt_prop_list **prop_list,
       (*prop_list)->properties_len_enc,
       &((*prop_list)->properties_len_enc_bytes),
       (*prop_list)->properties_len);
-    DBG("MQTT - New prop_list length %i\n", (*prop_list)->properties_len);
+    DBG("MQTT - New prop_list length %"PRIu32"\n", (*prop_list)->properties_len);
   } else {
     DBG("MQTT - Error encoding prop %i on msg %i\n", prop_id, msg);
 #if MQTT_PROP_USE_MEMB

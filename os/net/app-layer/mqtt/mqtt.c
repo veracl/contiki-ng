@@ -63,6 +63,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
+#include <inttypes.h>
 /*---------------------------------------------------------------------------*/
 #define DEBUG 0
 #if DEBUG
@@ -361,7 +362,7 @@ write_bytes(struct mqtt_connection *conn, uint8_t *data, uint16_t len)
   conn->out_write_pos += write_bytes;
   conn->out_buffer_ptr += write_bytes;
 
-  DBG("MQTT - (write_bytes) len: %u write_pos: %i\n", len,
+  DBG("MQTT - (write_bytes) len: %u write_pos: %"PRIu32"\n", len,
       conn->out_write_pos);
 
   if(len - conn->out_write_pos == 0) {
@@ -421,7 +422,7 @@ mqtt_encode_var_byte_int(uint8_t *vbi_out,
 {
   uint8_t digit;
 
-  DBG("MQTT - Encoding Variable Byte Integer %u\n", val);
+  DBG("MQTT - Encoding Variable Byte Integer %"PRIu32"\n", val);
 
   *vbi_bytes = 0;
   do {
@@ -433,7 +434,7 @@ mqtt_encode_var_byte_int(uint8_t *vbi_out,
 
     vbi_out[*vbi_bytes] = digit;
     (*vbi_bytes)++;
-    DBG("MQTT - Encode VBI digit '%u' length '%i'\n", digit, val);
+    DBG("MQTT - Encode VBI digit '%u' length '%"PRIu32"'\n", digit, val);
   } while(val > 0 && *vbi_bytes < 5);
   DBG("MQTT - var_byte_int bytes %u\n", *vbi_bytes);
 }
@@ -471,7 +472,7 @@ PT_THREAD(write_out_props(struct pt *pt, struct mqtt_connection *conn,
   static struct mqtt_prop_out_property *prop;
 
   if(prop_list) {
-    DBG("MQTT - Writing %i property bytes\n", prop_list->properties_len + prop_list->properties_len_enc_bytes);
+    DBG("MQTT - Writing %"PRIu32" property bytes\n", prop_list->properties_len + prop_list->properties_len_enc_bytes);
     /* Write total length of properties */
     PT_MQTT_WRITE_BYTES(conn,
                         prop_list->properties_len_enc,
@@ -480,7 +481,7 @@ PT_THREAD(write_out_props(struct pt *pt, struct mqtt_connection *conn,
     prop = (struct mqtt_prop_out_property *)list_head(prop_list->props);
     do {
       if(prop != NULL) {
-        DBG("MQTT - Property ID %i len %i\n", prop->id, prop->property_len);
+        DBG("MQTT - Property ID %i len %"PRIu32"\n", prop->id, prop->property_len);
         PT_MQTT_WRITE_BYTE(conn, prop->id);
         PT_MQTT_WRITE_BYTES(conn,
                             prop->val,
@@ -1334,7 +1335,6 @@ tcp_input(struct tcp_socket *s,
   uint32_t pos = 0;
   uint32_t copy_bytes = 0;
   mqtt_pub_status_t pub_status;
-  uint8_t remaining_length_bytes;
 
   if(input_data_len == 0) {
     return 0;
@@ -1360,17 +1360,17 @@ tcp_input(struct tcp_socket *s,
 
   /* Read the Remaining Length field, if we do not have it */
   if(!conn->in_packet.has_remaining_length) {
-    remaining_length_bytes =
+    conn->in_packet.remaining_length_enc_len =
       mqtt_decode_var_byte_int(input_data_ptr, input_data_len, &pos,
                                &conn->in_packet.byte_counter,
                                &conn->in_packet.remaining_length);
 
-    if(remaining_length_bytes == 0) {
+    if(conn->in_packet.remaining_length_enc_len == 0) {
       call_event(conn, MQTT_EVENT_ERROR, NULL);
       return 0;
     }
 
-    DBG("MQTT - Finished reading remaining length byte\n");
+    DBG("MQTT - Finished reading remaining length byte(s) %"PRIu16"\n", conn->in_packet.remaining_length);
     conn->in_packet.has_remaining_length = 1;
   }
 
@@ -1400,49 +1400,45 @@ tcp_input(struct tcp_socket *s,
    *       this loop.
    */
   while(conn->in_packet.byte_counter <
-        (MQTT_FHDR_SIZE + conn->in_packet.remaining_length)) {
+        (MQTT_FHDR_SIZE + conn->in_packet.remaining_length_enc_len + conn->in_packet.remaining_length)) {
 
     if((conn->in_packet.fhdr & 0xF0) == MQTT_FHDR_MSG_TYPE_PUBLISH &&
        conn->in_packet.topic_received == 0) {
       parse_publish_vhdr(conn, &pos, input_data_ptr, input_data_len);
     }
 
+#if MQTT_5
+    if((conn->in_packet.fhdr & 0xF0) == MQTT_FHDR_MSG_TYPE_PUBLISH &&
+       conn->in_packet.has_props == 0) {
+      mqtt_prop_decode_input_props(conn);
+      pos += conn->in_packet.properties_len + conn->in_packet.properties_enc_len;
+    }
+#endif
+
     /* Read in as much as we can into the packet payload */
     copy_bytes = MIN(input_data_len - pos,
                      MQTT_INPUT_BUFF_SIZE - conn->in_packet.payload_pos);
-    DBG("- Copied %i payload bytes\n", copy_bytes);
+    DBG("- Copied %"PRIu32" payload bytes\n", copy_bytes);
     memcpy(&conn->in_packet.payload[conn->in_packet.payload_pos],
            &input_data_ptr[pos],
            copy_bytes);
-    conn->in_packet.byte_counter += copy_bytes;
-    conn->in_packet.payload_pos += copy_bytes;
-    pos += copy_bytes;
-
 #if DEBUG_MQTT == 1
     uint32_t i;
     DBG("MQTT - Copied bytes: \n");
     for(i = 0; i < copy_bytes; i++) {
-      DBG("%02X ", conn->in_packet.payload[i]);
+      DBG("%02X ", conn->in_packet.payload[conn->in_packet.payload_pos+i]);
     }
     DBG("\n");
 #endif
+    conn->in_packet.byte_counter += copy_bytes;
+    conn->in_packet.payload_pos += copy_bytes;
+    pos += copy_bytes;
 
     /* Full buffer, shall only happen to PUBLISH messages. */
     if(MQTT_INPUT_BUFF_SIZE - conn->in_packet.payload_pos == 0) {
       conn->in_publish_msg.payload_chunk = conn->in_packet.payload;
       conn->in_publish_msg.payload_chunk_length = MQTT_INPUT_BUFF_SIZE;
       conn->in_publish_msg.payload_left -= MQTT_INPUT_BUFF_SIZE;
-
-#if MQTT_5
-      if(!conn->in_packet.has_props) {
-        mqtt_prop_decode_input_props(conn);
-      }
-
-      if(conn->in_publish_msg.first_chunk) {
-        conn->in_publish_msg.payload_chunk_length -= conn->in_packet.properties_len +
-          conn->in_packet.properties_enc_len;
-      }
-#endif
 
       pub_status = handle_publish(conn);
 
@@ -1454,8 +1450,8 @@ tcp_input(struct tcp_socket *s,
       }
     }
 
-    if(pos >= input_data_len &&
-       (conn->in_packet.byte_counter < (MQTT_FHDR_SIZE + conn->in_packet.remaining_length))) {
+    if(pos >= input_data_len && (conn->in_packet.byte_counter <
+      (MQTT_FHDR_SIZE + conn->in_packet.remaining_length_enc_len + conn->in_packet.remaining_length))) {
       return 0;
     }
   }
@@ -1467,8 +1463,7 @@ tcp_input(struct tcp_socket *s,
   /* Take care of input */
   DBG("MQTT - Finished reading packet!\n");
   /* What to return? */
-  DBG("MQTT - total data was %i bytes of data. \n",
-      (MQTT_FHDR_SIZE + conn->in_packet.remaining_length));
+  DBG("MQTT - total data was %"PRIu32" bytes of data. \n", conn->in_packet.byte_counter);
 
 #if MQTT_5
   if(conn->in_packet.has_reason_code &&
@@ -1495,12 +1490,6 @@ tcp_input(struct tcp_socket *s,
     conn->in_publish_msg.payload_left = 0;
 
     DBG("MQTT - First chunk? %i\n", conn->in_publish_msg.first_chunk);
-#if MQTT_5
-    if(conn->in_publish_msg.first_chunk) {
-      conn->in_publish_msg.payload_chunk_length -= conn->in_packet.properties_len +
-        conn->in_packet.properties_enc_len;
-    }
-#endif
     (void)handle_publish(conn);
     break;
   case MQTT_FHDR_MSG_TYPE_PUBACK:
